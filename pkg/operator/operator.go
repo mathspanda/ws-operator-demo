@@ -16,6 +16,7 @@ import (
 	"github.com/mathspanda/ws-operator-demo/pkg/apis/demo.io/v1"
 	"github.com/mathspanda/ws-operator-demo/pkg/controller"
 	"github.com/mathspanda/ws-operator-demo/pkg/k8s"
+	"k8s.io/apimachinery/pkg/util/wait"
 )
 
 type OperatorInterface interface {
@@ -32,23 +33,20 @@ type OperatorConfig struct {
 	ResyncPeriod   time.Duration
 }
 
-type WatchConfig struct {
+type operator struct {
 	watchNamespace string
 	resyncPeriod   time.Duration
-	handlers       cache.ResourceEventHandler
-}
 
-type operator struct {
 	kubeConfig *rest.Config
 	// k8s clientset
 	kubeClient *kubernetes.Clientset
 	// apiextensions clientset
 	aeClient *apiextensionsclient.Clientset
 
+	wsController *controller.WSController
+
 	crdI k8s.CRDInterface
 	crd  *k8s.CRD
-
-	watchConfig *WatchConfig
 
 	logger *log.Entry
 }
@@ -79,24 +77,22 @@ func NewOperator(config *OperatorConfig) (OperatorInterface, error) {
 		SchemeBuilder: v1.AddKnownTypes,
 	}
 
-	watchConfig := &WatchConfig{
-		resyncPeriod:   config.ResyncPeriod,
-		watchNamespace: config.WatchNamespace,
-		handlers: controller.NewWSController(&controller.WSControllerConfig{
-			AEClient:   aeClient,
-			KubeClient: kubeClient,
-			Namespace:  config.WatchNamespace,
-		}),
-	}
+	controller := controller.NewWSController(&controller.WSControllerConfig{
+		AEClient:   aeClient,
+		KubeClient: kubeClient,
+		Namespace:  config.WatchNamespace,
+	})
 
 	return &operator{
-		kubeConfig:  kubeConfig,
-		kubeClient:  kubeClient,
-		aeClient:    aeClient,
-		crdI:        k8s.NewCRD(aeClient),
-		crd:         crd,
-		watchConfig: watchConfig,
-		logger:      log.WithField("app", "operator"),
+		watchNamespace: config.WatchNamespace,
+		resyncPeriod:   config.ResyncPeriod,
+		kubeConfig:     kubeConfig,
+		kubeClient:     kubeClient,
+		aeClient:       aeClient,
+		crdI:           k8s.NewCRD(aeClient),
+		crd:            crd,
+		wsController:   controller,
+		logger:         log.WithField("app", "operator"),
 	}, nil
 }
 
@@ -123,18 +119,20 @@ func (o *operator) WatchEvents(ctx context.Context, crd *k8s.CRD) error {
 	source := cache.NewListWatchFromClient(
 		crdRestClient,
 		o.crd.Plural,
-		o.watchConfig.watchNamespace,
+		o.watchNamespace,
 		fields.Everything(),
 	)
-	_, controller := cache.NewIndexerInformer(
+	_, crdController := cache.NewIndexerInformer(
 		source,
 		o.crd.Obj,
-		o.watchConfig.resyncPeriod,
-		o.watchConfig.handlers,
+		o.resyncPeriod,
+		o.wsController,
 		cache.Indexers{},
 	)
 
-	go controller.Run(ctx.Done())
+	go wait.Until(o.wsController.Worker, time.Second, ctx.Done())
+
+	go crdController.Run(ctx.Done())
 
 	return nil
 }
