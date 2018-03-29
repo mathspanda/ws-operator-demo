@@ -12,6 +12,6 @@ rm ./simple_server
 cd ${ORIGIN_DIR}
 
 # push image
-docker login ${QiniuRegistry} -u ${QiniuRegistryAK} -p ${QiniuRegistrySK}
-docker tag ${IMG_NAME} ${QiniuRegistryPrefix}/${IMG_NAME}
-docker push ${QiniuRegistryPrefix}/${IMG_NAME}
+docker login ${Registry} -u ${RegistryAK} -p ${RegistrySK}
+docker tag ${IMG_NAME} ${RegistryPrefix}/${IMG_NAME}
+docker push ${RegistryPrefix}/${IMG_NAME}
