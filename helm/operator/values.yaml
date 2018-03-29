@@ -1,0 +1,16 @@
+appName: ws-operator-demo
+
+operatorImage:
+  repository: reg.qiniu.com/linpeiyu/ws-demo-operator
+  tag: "201803291420"
+  pullPolicy: IfNotPresent
+
+resyncSeconds: 180
+
+serviceAccount: ws-operator-demo
+clusterrole: ws-operator-demo-cr
+clusterrolebinding: ws-operator-demo-crb
+
+# Install RBAC roles and bindings
+rbac:
+  install: true

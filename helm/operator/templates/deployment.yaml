@@ -1,0 +1,26 @@
+apiVersion: extensions/v1beta1
+kind: Deployment
+metadata:
+  name: {{ .Values.appName }}
+  labels:
+    app: {{ .Values.appName }}
+spec:
+  replicas: {{ .Values.replicas }}
+  template:
+    metadata:
+      labels:
+        app: {{ .Values.appName }}
+    spec:
+{{- if .Values.rbac.install }}
+      serviceAccountName: {{ .Values.serviceAccount }}
+{{- end }}
+      containers:
+        - name: {{ .Chart.Name }}
+          image: "{{ .Values.operatorImage.repository }}:{{ .Values.operatorImage.tag }}"
+          imagePullPolicy: {{ .Values.operatorImage.pullPolicy }}
+          command: ["/sbin/my_init"]
+          env:
+            - name: WATCH_NAMESPACE
+              value: "{{ .Release.Namespace }}"
+            - name: RESYNC_SECONDS
+              value: "{{ .Values.resyncSeconds }}"

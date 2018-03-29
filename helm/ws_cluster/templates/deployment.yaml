@@ -1,0 +1,8 @@
+apiVersion: demo.io/v1
+kind: WebServerCluster
+metadata:
+  name: {{ .Values.appName }}
+spec:
+  replicas: {{ .Values.specData.replicas }}
+  image: {{ .Values.specData.image }}
+  port: {{ .Values.specData.port }}

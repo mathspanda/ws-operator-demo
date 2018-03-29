@@ -1,0 +1,4 @@
+apiVersion: v1
+description: deploy a simple web server cluster
+name: web-server-cluster
+version: 0.1.0

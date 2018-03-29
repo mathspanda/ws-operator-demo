@@ -1,0 +1,6 @@
+appName: ws-cluster-demo
+
+specData:
+  replicas: 4
+  image: mathspanda/simple-ws:201803291327
+  port: 32241
