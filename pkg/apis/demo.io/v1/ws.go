@@ -9,12 +9,17 @@ type WebServerCluster struct {
 	metav1.ObjectMeta `json:"metadata"`
 
 	Spec   WebServerClusterSpec   `json:"spec"`
+	Status WebServerClusterStatus `json:"status"`
 }
 
 type WebServerClusterSpec struct {
 	Replicas    *int32 `json:"replicas"`
 	Image       string `json:"image"`
 	ServicePort int32  `json:"port"`
+}
+
+type WebServerClusterStatus struct {
+	Replicas int32 `json:"replicas"`
 }
 
 type WebServerClusterList struct {

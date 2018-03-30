@@ -1,17 +1,21 @@
 package controller
 
 import (
+	"errors"
 	"reflect"
+	"time"
 
 	log "github.com/sirupsen/logrus"
 	apiextensionsclient "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/kubernetes"
 	apiv1 "k8s.io/client-go/pkg/api/v1"
 	extensionsv1beta1 "k8s.io/client-go/pkg/apis/extensions/v1beta1"
+	"k8s.io/client-go/rest"
 	"k8s.io/client-go/util/workqueue"
 
 	"github.com/mathspanda/ws-operator-demo/pkg/apis/demo.io/v1"
@@ -23,17 +27,27 @@ const (
 )
 
 type WSControllerConfig struct {
+	KubeConfig *rest.Config
 	AEClient   *apiextensionsclient.Clientset
 	KubeClient *kubernetes.Clientset
-	Namespace  string
+	Crd        *k8s.CRD
+
+	Namespace    string
+	ResyncPeriod time.Duration
 }
 
 type WSController struct {
+	kubeConfig *rest.Config
 	aeClient   *apiextensionsclient.Clientset
 	kubeClient *kubernetes.Clientset
 
 	deployI k8s.DeploymentInterface
 	svcI    k8s.ServiceInterface
+
+	crdI      k8s.CRDInterface
+	crdClient *rest.RESTClient
+	crdScheme *runtime.Scheme
+	crd       *k8s.CRD
 
 	queue workqueue.RateLimitingInterface
 
@@ -44,14 +58,19 @@ func NewWSController(config *WSControllerConfig) *WSController {
 	queue := workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(),
 		"ws-cluster-queue")
 
-	return &WSController{
+	controller := &WSController{
+		kubeConfig: config.KubeConfig,
 		aeClient:   config.AEClient,
 		kubeClient: config.KubeClient,
+		crd:        config.Crd,
+		crdI:       k8s.NewCRD(config.AEClient),
 		deployI:    k8s.NewDeployment(config.KubeClient, config.Namespace),
 		svcI:       k8s.NewService(config.KubeClient, config.Namespace),
 		queue:      queue,
 		logger:     log.WithField("service", "controller"),
 	}
+
+	return controller
 }
 
 func (w *WSController) Worker() {
@@ -79,7 +98,9 @@ func (w *WSController) handleErr(err error, task interface{}) {
 	}
 
 	if w.queue.NumRequeues(task) < maxRetries {
-		w.logger.Infof("Error syncing CRD: %v, %v", task, err)
+		crdTask := task.(*CRDTask)
+		crdObj := crdTask.CRDObj.(*v1.WebServerCluster)
+		w.logger.Infof("Error syncing CRD: %s %+v, %v", crdTask.CRDTaskType, *crdObj, err)
 		w.queue.AddRateLimited(task)
 		return
 	}
@@ -89,10 +110,12 @@ func (w *WSController) handleErr(err error, task interface{}) {
 	w.queue.Forget(task)
 }
 
-func (w *WSController) enqueueTask(taskType TaskType, ws *v1.WebServerCluster) {
+func (w *WSController) enqueueTask(taskType TaskType, ws *v1.WebServerCluster,
+	status *v1.WebServerClusterStatus) {
 	w.queue.Add(&CRDTask{
-		CRDTaskType: taskType,
-		CRDObj:      ws,
+		CRDTaskType:   taskType,
+		CRDObj:        ws,
+		CRDFObjStatus: status,
 	})
 }
 
@@ -108,6 +131,8 @@ func (w *WSController) sync(task interface{}) error {
 		err = w.updateWebServerCluster(wsCluster)
 	case TaskTypeDelete:
 		err = w.deleteWebServerCluster(wsCluster)
+	case TaskTypeUpdateStatus:
+		err = w.UpdateStatus(wsCluster, crdTask.CRDFObjStatus.(*v1.WebServerClusterStatus))
 	}
 
 	return err
@@ -115,7 +140,7 @@ func (w *WSController) sync(task interface{}) error {
 
 func (w *WSController) OnAdd(obj interface{}) {
 	wsCluster := obj.(*v1.WebServerCluster)
-	w.enqueueTask(TaskTypeAdd, wsCluster)
+	w.enqueueTask(TaskTypeAdd, wsCluster, nil)
 }
 
 func (w *WSController) OnUpdate(oldObj, newObj interface{}) {
@@ -123,13 +148,55 @@ func (w *WSController) OnUpdate(oldObj, newObj interface{}) {
 	newWSCluster := newObj.(*v1.WebServerCluster)
 
 	if !reflect.DeepEqual(oldWSCluster.Spec, newWSCluster.Spec) {
-		w.enqueueTask(TaskTypeUpdate, newWSCluster)
+		w.enqueueTask(TaskTypeUpdate, newWSCluster, nil)
 	}
 }
 
 func (w *WSController) OnDelete(obj interface{}) {
 	wsCluster := obj.(*v1.WebServerCluster)
-	w.enqueueTask(TaskTypeDelete, wsCluster)
+	w.enqueueTask(TaskTypeDelete, wsCluster, nil)
+}
+
+func (w *WSController) UpdateStatusForObj(obj interface{}, status interface{}) {
+	wsCluster := obj.(*v1.WebServerCluster)
+	wsClusterStatus := obj.(*v1.WebServerClusterStatus)
+	if !reflect.DeepEqual(wsCluster.Status, *wsClusterStatus) {
+		w.enqueueTask(TaskTypeUpdateStatus, wsCluster, wsClusterStatus)
+	}
+}
+
+func (w *WSController) UpdateStatus(ws *v1.WebServerCluster, status *v1.WebServerClusterStatus) error {
+	crdClient, crdScheme, err := w.getCRDClientScheme()
+	if err != nil {
+		return err
+	}
+
+	copyObj, err := crdScheme.DeepCopy(ws)
+	if err != nil {
+		return err
+	}
+	wsTask, ok := copyObj.(*v1.WebServerCluster)
+	if !ok {
+		return errors.New("Failed to convert object")
+	}
+
+	if reflect.DeepEqual(ws.Status, *status) {
+		return nil
+	}
+
+	wsTask.Status = *status
+	err = crdClient.Put().
+		Namespace(ws.ObjectMeta.Namespace).
+		Name(ws.ObjectMeta.Name).
+		Resource(w.crd.Plural).
+		Body(wsTask).
+		Do().
+		Error()
+	if err == nil {
+		w.logger.Infof("Successfully change WebServerCluster %s status from %v to %v", ws.ObjectMeta.Name,
+			ws.Status, *status)
+	}
+	return err
 }
 
 func (w *WSController) deleteWebServerCluster(ws *v1.WebServerCluster) error {
@@ -164,6 +231,11 @@ func (w *WSController) createWebServerCluster(ws *v1.WebServerCluster) error {
 	}
 
 	wsServiceData := w.newWebServerClusterServiceData(ws)
+	_, err = w.svcI.Get(ws.ObjectMeta.Name)
+	if err != nil && !apierrors.IsNotFound(err) {
+		return err
+	}
+
 	_, err = w.svcI.Create(w.svcI.MakeConfig(wsServiceData))
 	if err != nil {
 		if apierrors.IsAlreadyExists(err) {
@@ -171,6 +243,7 @@ func (w *WSController) createWebServerCluster(ws *v1.WebServerCluster) error {
 		}
 		return err
 	}
+
 	w.logger.Infof("Successfully create web server cluster %s", ws.ObjectMeta.Name)
 	return nil
 }
@@ -226,4 +299,16 @@ func (w *WSController) newWebServerClusterServiceData(ws *v1.WebServerCluster) *
 			Type: "LoadBalancer",
 		},
 	}
+}
+
+func (w *WSController) getCRDClientScheme() (*rest.RESTClient, *runtime.Scheme, error) {
+	var err error
+	if w.crdClient == nil || w.crdScheme == nil {
+		crdRestClientConfig := &k8s.CRDRestClientConfig{
+			KubeConfig: w.kubeConfig,
+			CRD:        w.crd,
+		}
+		w.crdClient, w.crdScheme, err = w.crdI.NewRestClient(crdRestClientConfig)
+	}
+	return w.crdClient, w.crdScheme, err
 }

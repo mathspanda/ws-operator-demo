@@ -2,7 +2,7 @@ appName: ws-operator-demo
 
 operatorImage:
   repository: reg.qiniu.com/linpeiyu/ws-demo-operator
-  tag: "201803291420"
+  tag: "201803301146"
   pullPolicy: IfNotPresent
 
 resyncSeconds: 180

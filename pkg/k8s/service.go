@@ -18,6 +18,7 @@ type ServiceInterface interface {
 	Create(*apiv1.Service) (*apiv1.Service, error)
 	Delete(string, *metav1.DeleteOptions) error
 	Update(*apiv1.Service) (*apiv1.Service, error)
+	Get(string) (*apiv1.Service, error)
 }
 
 type services struct {
@@ -52,4 +53,8 @@ func (s *services) Delete(svcName string, options *metav1.DeleteOptions) error {
 
 func (s *services) Update(svcConfig *apiv1.Service) (*apiv1.Service, error) {
 	return s.client.Update(svcConfig)
+}
+
+func (s *services) Get(svcName string) (*apiv1.Service, error) {
+	return s.client.Get(svcName, metav1.GetOptions{})
 }

@@ -2,6 +2,7 @@ package operator
 
 import (
 	"context"
+	"reflect"
 	"time"
 
 	log "github.com/sirupsen/logrus"
@@ -9,14 +10,15 @@ import (
 	apiextensionsclient "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
+	extensionsv1beta1 "k8s.io/client-go/pkg/apis/extensions/v1beta1"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/cache"
 
 	"github.com/mathspanda/ws-operator-demo/pkg/apis/demo.io/v1"
 	"github.com/mathspanda/ws-operator-demo/pkg/controller"
 	"github.com/mathspanda/ws-operator-demo/pkg/k8s"
-	"k8s.io/apimachinery/pkg/util/wait"
 )
 
 type OperatorInterface interface {
@@ -48,6 +50,8 @@ type operator struct {
 	crdI k8s.CRDInterface
 	crd  *k8s.CRD
 
+	crdStore cache.Store
+
 	logger *log.Entry
 }
 
@@ -78,9 +82,12 @@ func NewOperator(config *OperatorConfig) (OperatorInterface, error) {
 	}
 
 	controller := controller.NewWSController(&controller.WSControllerConfig{
-		AEClient:   aeClient,
-		KubeClient: kubeClient,
-		Namespace:  config.WatchNamespace,
+		KubeConfig:   kubeConfig,
+		AEClient:     aeClient,
+		KubeClient:   kubeClient,
+		Namespace:    config.WatchNamespace,
+		ResyncPeriod: config.ResyncPeriod,
+		Crd:          crd,
 	})
 
 	return &operator{
@@ -116,25 +123,57 @@ func (o *operator) WatchEvents(ctx context.Context, crd *k8s.CRD) error {
 		return err
 	}
 
-	source := cache.NewListWatchFromClient(
-		crdRestClient,
-		o.crd.Plural,
-		o.watchNamespace,
-		fields.Everything(),
-	)
-	_, crdController := cache.NewIndexerInformer(
-		source,
+	crdStore, crdController := cache.NewIndexerInformer(
+		cache.NewListWatchFromClient(
+			crdRestClient,
+			o.crd.Plural,
+			o.watchNamespace,
+			fields.Everything(),
+		),
 		o.crd.Obj,
 		o.resyncPeriod,
 		o.wsController,
+		cache.Indexers{},
+	)
+	o.crdStore = crdStore
+
+	_, deployController := cache.NewIndexerInformer(
+		cache.NewListWatchFromClient(
+			o.kubeClient.ExtensionsV1beta1().RESTClient(),
+			"deployments",
+			o.watchNamespace,
+			fields.Everything()),
+		&extensionsv1beta1.Deployment{},
+		o.resyncPeriod,
+		cache.ResourceEventHandlerFuncs{
+			UpdateFunc: o.updateCRDStatusByDeploy,
+		},
 		cache.Indexers{},
 	)
 
 	go wait.Until(o.wsController.Worker, time.Second, ctx.Done())
 
 	go crdController.Run(ctx.Done())
+	go deployController.Run(ctx.Done())
 
 	return nil
+}
+
+func (o *operator) updateCRDStatusByDeploy(oldObj, newObj interface{}) {
+	oldDeploy := oldObj.(*extensionsv1beta1.Deployment)
+	newDeploy := newObj.(*extensionsv1beta1.Deployment)
+
+	if oldDeploy.ResourceVersion != newDeploy.ResourceVersion &&
+		!reflect.DeepEqual(oldDeploy.Status, newDeploy.Status) {
+		crd, exists, err := o.crdStore.GetByKey(newDeploy.GetNamespace() + "/" + newDeploy.GetName())
+		if err != nil || !exists {
+			return
+		}
+		ws := crd.(*v1.WebServerCluster)
+		o.wsController.UpdateStatus(ws, &v1.WebServerClusterStatus{
+			Replicas: newDeploy.Status.Replicas,
+		})
+	}
 }
 
 func (o *operator) Run(ctx context.Context, stopCh <-chan struct{}) error {
