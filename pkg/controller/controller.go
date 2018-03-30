@@ -215,8 +215,11 @@ func (w *WSController) deleteWebServerCluster(ws *v1.WebServerCluster) error {
 }
 
 func (w *WSController) updateWebServerCluster(ws *v1.WebServerCluster) error {
+	owners := []metav1.OwnerReference{w.newOwnerRefOfWebServerCluster(ws)}
 	wsDeployData := w.newWebServerClusterDeploymentData(ws)
-	if _, err := w.deployI.Update(w.deployI.MakeConfig(wsDeployData)); err != nil {
+	wsDeploy := w.deployI.MakeConfig(wsDeployData)
+	wsDeploy.OwnerReferences = owners
+	if _, err := w.deployI.Update(wsDeploy); err != nil {
 		return err
 	}
 	w.logger.Infof("Successfully update web server cluster %s", ws.ObjectMeta.Name)
@@ -224,8 +227,12 @@ func (w *WSController) updateWebServerCluster(ws *v1.WebServerCluster) error {
 }
 
 func (w *WSController) createWebServerCluster(ws *v1.WebServerCluster) error {
+	owners := []metav1.OwnerReference{w.newOwnerRefOfWebServerCluster(ws)}
+
 	wsDeployData := w.newWebServerClusterDeploymentData(ws)
-	_, err := w.deployI.Create(w.deployI.MakeConfig(wsDeployData))
+	wsDeploy := w.deployI.MakeConfig(wsDeployData)
+	wsDeploy.OwnerReferences = owners
+	_, err := w.deployI.Create(wsDeploy)
 	if err != nil && !apierrors.IsAlreadyExists(err) {
 		return err
 	}
@@ -236,12 +243,16 @@ func (w *WSController) createWebServerCluster(ws *v1.WebServerCluster) error {
 		return err
 	}
 
-	_, err = w.svcI.Create(w.svcI.MakeConfig(wsServiceData))
-	if err != nil {
-		if apierrors.IsAlreadyExists(err) {
-			return nil
+	if apierrors.IsNotFound(err) {
+		wsSvc := w.svcI.MakeConfig(wsServiceData)
+		wsSvc.OwnerReferences = owners
+		_, err = w.svcI.Create(wsSvc)
+		if err != nil {
+			if apierrors.IsAlreadyExists(err) {
+				return nil
+			}
+			return err
 		}
-		return err
 	}
 
 	w.logger.Infof("Successfully create web server cluster %s", ws.ObjectMeta.Name)
@@ -311,4 +322,15 @@ func (w *WSController) getCRDClientScheme() (*rest.RESTClient, *runtime.Scheme, 
 		w.crdClient, w.crdScheme, err = w.crdI.NewRestClient(crdRestClientConfig)
 	}
 	return w.crdClient, w.crdScheme, err
+}
+
+func (w *WSController) newOwnerRefOfWebServerCluster(ws *v1.WebServerCluster) metav1.OwnerReference {
+	blockOwnerDeletion := true
+	return metav1.OwnerReference{
+		Kind:               w.crd.Kind,
+		APIVersion:         w.crd.Group + "/" + w.crd.Version,
+		Name:               ws.ObjectMeta.Name,
+		UID:                ws.UID,
+		BlockOwnerDeletion: &blockOwnerDeletion,
+	}
 }
